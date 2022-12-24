@@ -1,0 +1,14 @@
+version: '3'
+
+services:
+  ch_server:
+    image: yandex/clickhouse-server
+    container_name: compose-some-clickhouse-server
+    ports:
+      - "9000:9000"
+
+  client:
+    build: ./client
+    container_name: python_client_script
+    depends_on:
+      - ch_server
