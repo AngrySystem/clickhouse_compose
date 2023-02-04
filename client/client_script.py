@@ -29,7 +29,7 @@ if not exist:
     seed = 42
     rng = np.random.default_rng(seed)
 
-    num_all = 2_000_000
+    num_all = 100
 
     client.execute('CREATE DATABASE logistics;')
     client.execute('use logistics;')
@@ -127,9 +127,79 @@ if not exist:
     data_orders = [[order_id[i], order_medicine_id[i], barcode[i], amount[i], order_region_id[i], unit[i], int(dates[i])] for i in range(num_all)]
 
 
-    client.execute("INSERT INTO logistics.medicines (med_id, artikul, nomenclature, weight, volume, price) VALUES", (i for i in data_medicines))
+    # Storehouse
+
+    # 1 (store_id)
+
+    # 2 (amount)
+    store_amount_85 = int(n_size * 0.85)
+    store_amount_15 = n_size - store_amount_85
+    normal_part_store_amount  = rng.normal(120_000, 10_000, size=(store_amount_85,)).astype(np.int32)
+    uniform_part_store_amount = rng.uniform(50_000, 250_000, size=(store_amount_15)).astype(np.int32)
+    amount_in_store = np.concatenate((normal_part_store_amount, uniform_part_store_amount)) # use
+    rng.shuffle(amount_in_store)
+
+    store_amount = [amount_in_store[i] for i in range(n_size)]
+
+    meds_amount = str([f'med_good_{i} UInt32' for i in range(n_size)])[1:-1]
+    meds_amount = meds_amount.replace("'", "")
+
+    meds_insert = str([f'med_good_{i}' for i in range(n_size)])[1:-1]
+    meds_insert = meds_insert.replace("'", "")
+
+
+    client.execute(f'CREATE TABLE storehouse (store_id UInt32, {meds_amount}) ENGINE = MergeTree() PRIMARY KEY (store_id);')
+
+    client.execute(f"INSERT INTO logistics.storehouse (store_id, {meds_insert}) VALUES", [[0] + store_amount])
     client.execute("INSERT INTO logistics.regions (region_id, region_name) VALUES", (i for i in data_regions))
-    client.execute("INSERT INTO logistics.orders (order_id, med_id, barcode, amount, region_id, unit, date) VALUES", (i for i in data_orders))
+    client.execute("INSERT INTO logistics.medicines (med_id, artikul, nomenclature, weight, volume, price) VALUES", (i for i in data_medicines))
+
+    delay_orders = []
+
+    canceled_orders = []
+    name_canceled_orders = {}
+
+    for i in range(num_all):
+
+        # Если товар помечен как закончившийся, кладем заказ в отмененные
+        if data_orders[i][1] in name_canceled_orders:
+            canceled_orders.append(data_orders[i])
+            continue
+
+        # Смотрим сколько штук данного товара осталось
+        num_left = client.execute(f"SELECT med_good_{data_orders[i][1]} FROM logistics.storehouse ORDER BY store_id DESC LIMIT 1;")
+
+        # Если товара больше нет на складе, кладем заказ в отмененные и помечаем что данного товара больше нет
+        if num_left - data_orders[i][3] < 0:
+            canceled_orders.append(data_orders[i])
+            name_canceled_orders[data_orders[i][1]] = 'out_of_stock'
+            continue
+
+        # Если заказ не самый первый
+        if i != 0:
+            # Время предыдущего заказа
+            last_time_stamp = client.execute(f'SELECT date FROM logistics.orders WHERE order_id = {i - 1};')
+
+            last_time_stamp = int(last_time_stamp[0][0].timestamp())
+            
+            # проверяем совпадает время последнего заказа с текущим
+            is_same_time = last_time_stamp == data_orders[i][6]
+
+            # если время с предыдущим совпадает добавляем его в отложенные заказы
+            if is_same_time:
+                delay_orders.append(data_orders[i])
+                continue
+
+            # если есть отложенные заказы, и время первого в отложенной очереди не совпадает с временем последнего товара вставляем его в заказы
+            if len(delay_orders) and last_time_stamp != delay_orders[0][6]:
+                client.execute(f"INSERT INTO logistics.orders (order_id, med_id, barcode, amount, region_id, unit, date) VALUES", [delay_orders.pop(0)])
+
+        # Оформляем заказ
+        client.execute("INSERT INTO logistics.orders (order_id, med_id, barcode, amount, region_id, unit, date) VALUES", [data_orders[i]])
+
+        # Обновляем кол-во оставшихся товаров
+        store_amount[data_orders[i][1]] -= data_orders[i][3]
+        client.execute(f"INSERT INTO logistics.storehouse (store_id, {meds_insert}) VALUES", [[i + 1] + store_amount])
 
 
 client.execute('use logistics;')
@@ -138,9 +208,9 @@ databases = client.execute("SHOW DATABASES;")
 tables    = client.execute("SHOW TABLES;")
 
 from_medicines = client.execute("SELECT * FROM medicines limit 5;")
-from_regions  = client.execute("SELECT * FROM regions limit 5;")
-from_orders   = client.execute("SELECT * FROM orders limit 5;")
-
+from_regions   = client.execute("SELECT * FROM regions limit 5;")
+from_orders    = client.execute("SELECT * FROM orders limit 5;")
+from_storehouse = client.execute("SELECT * FROM storehouse limit 5;")
 
 def dot_line():
     print('------------------------------')
@@ -164,6 +234,11 @@ for i in from_orders:
     print(i)
 
 dot_line()
+print("First 5 columns from orders:")
+for i in from_storehouse:
+    print(i)
+
+dot_line()
 
 coop = client.execute("""SELECT orders.order_id AS id, med.nomenclature AS name, reg.region_name AS region, orders.date, med.price*orders.amount AS total_sum 
                          FROM orders
@@ -175,3 +250,7 @@ print("First 5 columns from coop (order_id, nomenclature, region, date, price*am
 
 for i in coop:
     print(i)
+
+print("Таблица с закончившимися лекарствами:\n", name_canceled_orders)
+print(canceled_orders)
+print(client.execute("SELECT * FROM logistics.storehouse ORDER BY store_id DESC LIMIT 1;"))
