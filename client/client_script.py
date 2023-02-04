@@ -29,7 +29,7 @@ if not exist:
     seed = 42
     rng = np.random.default_rng(seed)
 
-    num_all = 100
+    num_all = 5000
 
     client.execute('CREATE DATABASE logistics;')
     client.execute('use logistics;')
@@ -101,7 +101,7 @@ if not exist:
     # 4 (amount)
     num_amount_90 = int(num_all * 0.85)
     num_amount_10 = num_all - num_amount_90
-    normal_part_amount  = rng.normal(32, 6, size=(num_amount_90,)).astype(np.int32)
+    normal_part_amount  = rng.normal(32, 6, size=(num_amount_90,)).astype(np.int32) # кол-во покупаемое
     uniform_part_amount = rng.uniform(60, 1500, size=(num_amount_10)).astype(np.int32)
     amount = np.concatenate((normal_part_amount, uniform_part_amount)) # use
     rng.shuffle(amount)
@@ -134,8 +134,8 @@ if not exist:
     # 2 (amount)
     store_amount_85 = int(n_size * 0.85)
     store_amount_15 = n_size - store_amount_85
-    normal_part_store_amount  = rng.normal(120_000, 10_000, size=(store_amount_85,)).astype(np.int32)
-    uniform_part_store_amount = rng.uniform(50_000, 250_000, size=(store_amount_15)).astype(np.int32)
+    normal_part_store_amount  = rng.normal(20_000, 2_000, size=(store_amount_85,)).astype(np.int32)
+    uniform_part_store_amount = rng.uniform(10_000, 100_000, size=(store_amount_15)).astype(np.int32)
     amount_in_store = np.concatenate((normal_part_store_amount, uniform_part_store_amount)) # use
     rng.shuffle(amount_in_store)
 
@@ -166,11 +166,14 @@ if not exist:
             canceled_orders.append(data_orders[i])
             continue
 
-        # Смотрим сколько штук данного товара осталось
-        num_left = client.execute(f"SELECT med_good_{data_orders[i][1]} FROM logistics.storehouse ORDER BY store_id DESC LIMIT 1;")
+        # Смотрим сколько штук данного товара было приобретено
+        num_left = client.execute(f"SELECT sum(orders.amount) FROM logistics.orders WHERE orders.med_id == {data_orders[i][1]}")[0][0]
+
+        # Смотрим сколько данного товара осталось на складе 
+        num_left_storehouse = client.execute(f"SELECT med_good_{data_orders[i][1]} FROM logistics.storehouse")[0][0]
 
         # Если товара больше нет на складе, кладем заказ в отмененные и помечаем что данного товара больше нет
-        if num_left - data_orders[i][3] < 0:
+        if num_left_storehouse - num_left < 0:
             canceled_orders.append(data_orders[i])
             name_canceled_orders[data_orders[i][1]] = 'out_of_stock'
             continue
@@ -198,8 +201,8 @@ if not exist:
         client.execute("INSERT INTO logistics.orders (order_id, med_id, barcode, amount, region_id, unit, date) VALUES", [data_orders[i]])
 
         # Обновляем кол-во оставшихся товаров
-        store_amount[data_orders[i][1]] -= data_orders[i][3]
-        client.execute(f"INSERT INTO logistics.storehouse (store_id, {meds_insert}) VALUES", [[i + 1] + store_amount])
+        # store_amount[data_orders[i][1]] -= data_orders[i][3]
+        # client.execute(f"INSERT INTO logistics.storehouse (store_id, {meds_insert}) VALUES", [[i + 1] + store_amount])
 
 
 client.execute('use logistics;')
@@ -210,7 +213,7 @@ tables    = client.execute("SHOW TABLES;")
 from_medicines = client.execute("SELECT * FROM medicines limit 5;")
 from_regions   = client.execute("SELECT * FROM regions limit 5;")
 from_orders    = client.execute("SELECT * FROM orders limit 5;")
-from_storehouse = client.execute("SELECT * FROM storehouse limit 5;")
+from_storehouse = client.execute("SELECT * FROM storehouse;")
 
 def dot_line():
     print('------------------------------')
@@ -234,9 +237,8 @@ for i in from_orders:
     print(i)
 
 dot_line()
-print("First 5 columns from orders:")
-for i in from_storehouse:
-    print(i)
+print("First column from storehouse:")
+print(from_storehouse[0])
 
 dot_line()
 
@@ -252,5 +254,7 @@ for i in coop:
     print(i)
 
 print("Таблица с закончившимися лекарствами:\n", name_canceled_orders)
-print(canceled_orders)
-print(client.execute("SELECT * FROM logistics.storehouse ORDER BY store_id DESC LIMIT 1;"))
+print("Отмененные заказы:\n", canceled_orders)
+
+num_left_end = [client.execute(f"SELECT sum(orders.amount) FROM logistics.orders WHERE orders.med_id == {i}")[0][0] for i in range(n_size)]
+print(num_left_end)
